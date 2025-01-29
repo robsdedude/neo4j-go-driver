@@ -141,7 +141,7 @@ func (r *Router) readTable(
 	return table, nil
 }
 
-func (r *Router) getTable(database string) *idb.RoutingTable {
+func (r *Router) GetTable(database string) *idb.RoutingTable {
 	r.dbRoutersMut.Lock()
 	defer r.dbRoutersMut.Unlock()
 
@@ -149,7 +149,7 @@ func (r *Router) getTable(database string) *idb.RoutingTable {
 	return r.getTableLocked(dbRouter)
 }
 
-func (r *Router) getOrUpdateTable(ctx context.Context, bookmarksFn func(context.Context) ([]string, error), database string, auth *idb.ReAuthToken, boltLogger log.BoltLogger) (*idb.RoutingTable, error) {
+func (r *Router) getOrUpdateTable(ctx context.Context, bookmarksFn func(context.Context) ([]string, error), database string, auth *idb.ReAuthToken, boltLogger log.BoltLogger, useHomeDbGuess bool) (*idb.RoutingTable, error) {
 	r.dbRoutersMut.Lock()
 	var unlock = new(sync.Once)
 	defer unlock.Do(r.dbRoutersMut.Unlock)
@@ -176,8 +176,13 @@ func (r *Router) getOrUpdateTable(ctx context.Context, bookmarksFn func(context.
 		// this goroutine will update the table
 		r.updating[database] = make([]chan struct{}, 0)
 		unlock.Do(r.dbRoutersMut.Unlock)
-
-		table, err := r.updateTable(ctx, bookmarksFn, database, auth, boltLogger, dbRouter)
+		// Use an empty string for updating the routing table if the home database is a guess,
+		// as we cannot guarantee the guess is correct.
+		targetDatabase := database
+		if useHomeDbGuess {
+			targetDatabase = ""
+		}
+		table, err := r.updateTable(ctx, bookmarksFn, targetDatabase, auth, boltLogger, dbRouter)
 		r.dbRoutersMut.Lock()
 		*unlock = sync.Once{}
 		// notify all waiters
@@ -215,8 +220,8 @@ func (r *Router) updateTable(ctx context.Context, bookmarksFn func(context.Conte
 	return table, nil
 }
 
-func (r *Router) GetOrUpdateReaders(ctx context.Context, bookmarks func(context.Context) ([]string, error), database string, auth *idb.ReAuthToken, boltLogger log.BoltLogger) ([]string, error) {
-	table, err := r.getOrUpdateTable(ctx, bookmarks, database, auth, boltLogger)
+func (r *Router) GetOrUpdateReaders(ctx context.Context, bookmarks func(context.Context) ([]string, error), database string, auth *idb.ReAuthToken, boltLogger log.BoltLogger, useHomeDbGuess bool) ([]string, error) {
+	table, err := r.getOrUpdateTable(ctx, bookmarks, database, auth, boltLogger, useHomeDbGuess)
 	if err != nil {
 		return nil, err
 	}
@@ -231,7 +236,7 @@ func (r *Router) GetOrUpdateReaders(ctx context.Context, bookmarks func(context.
 		r.log.Infof(log.Router, r.logId, "Invalidating routing table, no readers")
 		r.Invalidate(table.DatabaseName)
 		r.sleep(100 * time.Millisecond)
-		table, err = r.getOrUpdateTable(ctx, bookmarks, database, auth, boltLogger)
+		table, err = r.getOrUpdateTable(ctx, bookmarks, database, auth, boltLogger, useHomeDbGuess)
 		if err != nil {
 			return nil, err
 		}
@@ -244,15 +249,15 @@ func (r *Router) GetOrUpdateReaders(ctx context.Context, bookmarks func(context.
 }
 
 func (r *Router) Readers(database string) []string {
-	table := r.getTable(database)
+	table := r.GetTable(database)
 	if table == nil {
 		return nil
 	}
 	return table.Readers
 }
 
-func (r *Router) GetOrUpdateWriters(ctx context.Context, bookmarks func(context.Context) ([]string, error), database string, auth *idb.ReAuthToken, boltLogger log.BoltLogger) ([]string, error) {
-	table, err := r.getOrUpdateTable(ctx, bookmarks, database, auth, boltLogger)
+func (r *Router) GetOrUpdateWriters(ctx context.Context, bookmarks func(context.Context) ([]string, error), database string, auth *idb.ReAuthToken, boltLogger log.BoltLogger, useHomeDbGuess bool) ([]string, error) {
+	table, err := r.getOrUpdateTable(ctx, bookmarks, database, auth, boltLogger, useHomeDbGuess)
 	if err != nil {
 		return nil, err
 	}
@@ -267,7 +272,7 @@ func (r *Router) GetOrUpdateWriters(ctx context.Context, bookmarks func(context.
 		r.log.Infof(log.Router, r.logId, "Invalidating routing table, no writers")
 		r.Invalidate(database)
 		r.sleep(100 * time.Millisecond)
-		table, err = r.getOrUpdateTable(ctx, bookmarks, database, auth, boltLogger)
+		table, err = r.getOrUpdateTable(ctx, bookmarks, database, auth, boltLogger, useHomeDbGuess)
 		if err != nil {
 			return nil, err
 		}
@@ -280,7 +285,7 @@ func (r *Router) GetOrUpdateWriters(ctx context.Context, bookmarks func(context.
 }
 
 func (r *Router) Writers(database string) []string {
-	table := r.getTable(database)
+	table := r.GetTable(database)
 	if table == nil {
 		return nil
 	}

@@ -20,6 +20,7 @@ package neo4j
 import (
 	"context"
 	"fmt"
+	"github.com/neo4j/neo4j-go-driver/v5/neo4j/internal/homedb"
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j/internal/racing"
 	"math"
 	"time"
@@ -200,29 +201,34 @@ type sessionPool interface {
 }
 
 type sessionWithContext struct {
-	driverConfig  *Config
-	defaultMode   idb.AccessMode
-	bookmarks     *sessionBookmarks
-	resolveHomeDb bool
-	pool          sessionPool
-	router        sessionRouter
-	explicitTx    *explicitTransaction
-	autocommitTx  *autocommitTransaction
-	sleep         func(context.Context, time.Duration) error
-	logId         string
-	log           log.Logger
-	throttleTime  time.Duration
-	fetchSize     int
-	config        SessionConfig
-	auth          *idb.ReAuthToken
-	closed        bool
+	driverConfig            *Config
+	defaultMode             idb.AccessMode
+	bookmarks               *sessionBookmarks
+	resolveHomeDb           bool
+	homeDbGuess             string
+	pool                    sessionPool
+	router                  sessionRouter
+	cache                   *homedb.Cache
+	pinHomeDatabaseCallback func(string)
+	explicitTx              *explicitTransaction
+	autocommitTx            *autocommitTransaction
+	sleep                   func(context.Context, time.Duration) error
+	logId                   string
+	log                     log.Logger
+	throttleTime            time.Duration
+	fetchSize               int
+	config                  SessionConfig
+	auth                    *idb.ReAuthToken
+	closed                  bool
 }
 
 func newSessionWithContext(
+	ctx context.Context,
 	config *Config,
 	sessConfig SessionConfig,
 	router sessionRouter,
 	pool sessionPool,
+	cache *homedb.Cache,
 	logger log.Logger,
 	token *idb.ReAuthToken,
 ) *sessionWithContext {
@@ -234,14 +240,23 @@ func newSessionWithContext(
 		fetchSize = sessConfig.FetchSize
 	}
 
-	return &sessionWithContext{
+	// Get cached home database guess
+	var homeDbGuess = idb.DefaultDatabase
+	auth, err := token.Manager.GetAuthToken(ctx)
+	if err == nil {
+		homeDbGuess, _ = cache.Get(cache.ComputeKey(sessConfig.ImpersonatedUser, auth, token.FromSession))
+	}
+
+	session := &sessionWithContext{
 		driverConfig:  config,
 		router:        router,
 		pool:          pool,
+		cache:         cache,
 		defaultMode:   idb.AccessMode(sessConfig.AccessMode),
 		bookmarks:     newSessionBookmarks(sessConfig.BookmarkManager, sessConfig.Bookmarks),
 		config:        sessConfig,
 		resolveHomeDb: sessConfig.DatabaseName == "",
+		homeDbGuess:   homeDbGuess,
 		sleep:         racing.Sleep,
 		log:           logger,
 		logId:         logId,
@@ -249,6 +264,10 @@ func newSessionWithContext(
 		fetchSize:     fetchSize,
 		auth:          token,
 	}
+	session.pinHomeDatabaseCallback = func(database string) {
+		session.pinHomeDatabase(ctx, database)
+	}
+	return session
 }
 
 func (s *sessionWithContext) lastBookmark() string {
@@ -526,11 +545,15 @@ func (s *sessionWithContext) executeTransactionFunction(
 	return true, x
 }
 
-func (s *sessionWithContext) getOrUpdateServers(ctx context.Context, mode idb.AccessMode) ([]string, error) {
+func (s *sessionWithContext) getOrUpdateServers(ctx context.Context, mode idb.AccessMode, useHomeDbGuess bool) ([]string, error) {
+	database := s.config.DatabaseName
+	if useHomeDbGuess {
+		database = s.homeDbGuess
+	}
 	if mode == idb.ReadMode {
-		return s.router.GetOrUpdateReaders(ctx, s.getBookmarks, s.config.DatabaseName, s.auth, s.config.BoltLogger)
+		return s.router.GetOrUpdateReaders(ctx, s.getBookmarks, database, s.auth, s.config.BoltLogger, useHomeDbGuess)
 	} else {
-		return s.router.GetOrUpdateWriters(ctx, s.getBookmarks, s.config.DatabaseName, s.auth, s.config.BoltLogger)
+		return s.router.GetOrUpdateWriters(ctx, s.getBookmarks, database, s.auth, s.config.BoltLogger, useHomeDbGuess)
 	}
 }
 
@@ -556,24 +579,63 @@ func (s *sessionWithContext) getConnection(ctx context.Context, mode idb.AccessM
 		s.log.Debugf(log.Session, s.logId, "connection acquisition user-provided deadline is: %s", deadline)
 	}
 
-	if err := s.resolveHomeDatabase(ctx); err != nil {
-		return nil, errorutil.WrapError(err)
-	}
-	_, err := s.getOrUpdateServers(ctx, mode)
-	if err != nil {
-		return nil, errorutil.WrapError(err)
+	var err error
+	var serverList []string
+
+	if s.config.DatabaseName != "" {
+		if resolveErr := s.resolveHomeDatabase(ctx); resolveErr != nil {
+			return nil, errorutil.WrapError(resolveErr)
+		}
+		serverList, err = s.getOrUpdateServers(ctx, mode, false)
+		s.resolveHomeDb = false
+	} else {
+		if s.homeDbGuess != "" && s.router.GetTable(s.homeDbGuess) != nil && s.cache.IsEnabled() {
+			// If a routing table is found via the cache: do not pin the cached home database to the session.
+			// Instead, send the next RUN/BEGIN request to the server without a set db.
+			serverList, err = s.getOrUpdateServers(ctx, mode, true)
+		} else {
+			// If a routing table for the cached db is not available, or there is no cached db: send a ROUTE
+			// message to the server, do not set the cached database as db for the route, instead route without a set db.
+			if resolveErr := s.resolveHomeDatabase(ctx); resolveErr != nil {
+				return nil, errorutil.WrapError(resolveErr)
+			}
+			serverList, err = s.getOrUpdateServers(ctx, mode, s.cache.IsEnabled())
+		}
 	}
 
 	conn, err := s.pool.Borrow(
 		ctx,
-		s.getServers(mode),
+		// TODO should we have refactored s.getServers(mode)? Or is it better to just use serverList directly?
+		// What about other places that call s.getServers(mode) such as verifyAuthentication and getServerInfo?
+		func() []string { return serverList },
 		timeout != 0,
 		s.config.BoltLogger,
 		livenessCheckTimeout,
 		s.auth)
+
+	// Before using this connection we need to check if SSR is still enabled.
+	// If not we need to return the connection and resolve as normal.
+	if conn != nil && !conn.IsSsrEnabled() && s.homeDbGuess != "" {
+		s.pool.Return(ctx, conn)
+
+		if resolveErr := s.resolveHomeDatabase(ctx); resolveErr != nil {
+			return nil, errorutil.WrapError(resolveErr)
+		}
+		serverList, err = s.getOrUpdateServers(ctx, mode, false)
+
+		conn, err = s.pool.Borrow(
+			ctx,
+			func() []string { return serverList },
+			timeout != 0,
+			s.config.BoltLogger,
+			livenessCheckTimeout,
+			s.auth)
+	}
+
 	if err != nil {
 		return nil, errorutil.WrapError(err)
 	}
+	conn.SetPinHomeDatabaseCallback(s.pinHomeDatabaseCallback)
 
 	// Select database on server
 	if s.config.DatabaseName != idb.DefaultDatabase {
@@ -725,7 +787,7 @@ func (s *sessionWithContext) getServerInfo(ctx context.Context) (ServerInfo, err
 	if err := s.resolveHomeDatabase(ctx); err != nil {
 		return nil, errorutil.WrapError(err)
 	}
-	_, err := s.getOrUpdateServers(ctx, idb.ReadMode)
+	_, err := s.getOrUpdateServers(ctx, idb.ReadMode, false)
 	if err != nil {
 		return nil, errorutil.WrapError(err)
 	}
@@ -748,7 +810,7 @@ func (s *sessionWithContext) getServerInfo(ctx context.Context) (ServerInfo, err
 }
 
 func (s *sessionWithContext) verifyAuthentication(ctx context.Context) error {
-	_, err := s.getOrUpdateServers(ctx, idb.ReadMode)
+	_, err := s.getOrUpdateServers(ctx, idb.ReadMode, false)
 	if err != nil {
 		return errorutil.WrapError(err)
 	}
@@ -784,10 +846,25 @@ func (s *sessionWithContext) resolveHomeDatabase(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	s.log.Debugf(log.Session, s.logId, "Resolved home database, uses db '%s'", defaultDb)
-	s.config.DatabaseName = defaultDb
-	s.resolveHomeDb = false
+	s.pinHomeDatabase(ctx, defaultDb)
 	return nil
+}
+
+func (s *sessionWithContext) pinHomeDatabase(ctx context.Context, database string) {
+	if !s.resolveHomeDb {
+		return
+	}
+	token, err := s.auth.Manager.GetAuthToken(ctx)
+	if err != nil {
+		return
+	}
+	user := s.cache.ComputeKey(s.config.ImpersonatedUser, token, s.auth.FromSession)
+	s.cache.Set(user, database)
+
+	s.log.Debugf(log.Session, s.logId, "Resolved home database, uses db '%s'", database)
+	s.homeDbGuess = database
+	s.config.DatabaseName = database
+	s.resolveHomeDb = false
 }
 
 func (s *sessionWithContext) getBookmarks(ctx context.Context) (Bookmarks, error) {

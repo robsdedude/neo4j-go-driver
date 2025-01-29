@@ -988,6 +988,14 @@ func (b *bolt4) Telemetry(telemetry.API, func()) {
 	// TELEMETRY not support by this protocol version, so we ignore it.
 }
 
+func (b *bolt4) SetPinHomeDatabaseCallback(func(string)) {
+	// Home database not supported by this protocol version, so we ignore it.
+}
+
+func (b *bolt4) IsSsrEnabled() bool {
+	return false
+}
+
 func (b *bolt4) helloResponseHandler(checkUtcPatch bool) responseHandler {
 	return b.expectedSuccessHandler(b.onHelloSuccess(checkUtcPatch))
 }

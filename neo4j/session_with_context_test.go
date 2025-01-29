@@ -21,8 +21,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	iauth "github.com/neo4j/neo4j-go-driver/v5/neo4j/internal/auth"
 	idb "github.com/neo4j/neo4j-go-driver/v5/neo4j/internal/db"
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j/internal/errorutil"
+	"github.com/neo4j/neo4j-go-driver/v5/neo4j/internal/homedb"
 	"io"
 	"reflect"
 	"sync"
@@ -37,6 +39,8 @@ import (
 type transactionFunc func(context.Context, ManagedTransactionWork, ...func(*TransactionConfig)) (any, error)
 type transactionFuncApi func(session SessionWithContext) transactionFunc
 
+var reAuthToken = &idb.ReAuthToken{FromSession: false, Manager: iauth.Token{Tokens: map[string]any{"scheme": "none"}}}
+
 func TestSession(outer *testing.T) {
 	var logger = log.ToVoid()
 	var boltLogger log.BoltLogger = nil
@@ -48,20 +52,24 @@ func TestSession(outer *testing.T) {
 	}
 
 	createSession := func() (*RouterFake, *PoolFake, *sessionWithContext) {
+		ctx := context.Background()
 		conf := Config{MaxTransactionRetryTime: 3 * time.Millisecond, MaxConnectionPoolSize: 100}
 		router := RouterFake{}
 		pool := PoolFake{}
+		cache, _ := homedb.NewCache(100)
 		sessConfig := SessionConfig{AccessMode: AccessModeRead, BoltLogger: boltLogger}
-		sess := newSessionWithContext(&conf, sessConfig, &router, &pool, logger, nil)
+		sess := newSessionWithContext(ctx, &conf, sessConfig, &router, &pool, cache, logger, reAuthToken)
 		sess.throttleTime = time.Millisecond * 1
 		return &router, &pool, sess
 	}
 
 	createSessionFromConfig := func(sessConfig SessionConfig) (*RouterFake, *PoolFake, *sessionWithContext) {
+		ctx := context.Background()
 		conf := Config{MaxTransactionRetryTime: 3 * time.Millisecond}
 		router := RouterFake{}
 		pool := PoolFake{}
-		sess := newSessionWithContext(&conf, sessConfig, &router, &pool, logger, nil)
+		cache, _ := homedb.NewCache(100)
+		sess := newSessionWithContext(ctx, &conf, sessConfig, &router, &pool, cache, logger, reAuthToken)
 		sess.throttleTime = time.Millisecond * 1
 		return &router, &pool, sess
 	}

@@ -23,6 +23,7 @@ package pool
 import (
 	"container/list"
 	"context"
+	"github.com/neo4j/neo4j-go-driver/v5/neo4j/internal/homedb"
 	"math"
 	"sort"
 	"sync"
@@ -64,6 +65,7 @@ type Pool struct {
 	closed     bool
 	log        log.Logger
 	logId      string
+	cache      *homedb.Cache
 }
 
 type serverPenalty struct {
@@ -71,7 +73,7 @@ type serverPenalty struct {
 	penalty uint32
 }
 
-func New(config *config.Config, connect Connect, logger log.Logger, logId string) *Pool {
+func New(config *config.Config, connect Connect, logger log.Logger, logId string, cache *homedb.Cache) *Pool {
 	// Means infinite life, simplifies checking later on
 
 	p := &Pool{
@@ -83,6 +85,7 @@ func New(config *config.Config, connect Connect, logger log.Logger, logId string
 		queueMut:   sync.Mutex{},
 		logId:      logId,
 		log:        logger,
+		cache:      cache,
 	}
 	p.log.Infof(log.Pool, p.logId, "Created")
 	return p
@@ -210,6 +213,8 @@ func (p *Pool) Borrow(
 		for _, s := range penalties {
 			conn, err = p.tryBorrow(ctx, s.name, boltLogger, idlenessTimeout, auth)
 			if conn != nil {
+				// Update the cache state after borrowing a connection since ssr support may have changed.
+				p.updateCacheState()
 				return conn, nil
 			}
 
@@ -436,6 +441,8 @@ func (p *Pool) Return(ctx context.Context, c idb.Connection) {
 		}
 		p.serversMut.Unlock()
 	}
+	// Update the cache state after returning a connection since ssr support may have changed.
+	p.updateCacheState()
 
 	// Check if there is anyone in the queue waiting for a connection to this server.
 	p.queueMut.Lock()
@@ -506,4 +513,22 @@ func (p *Pool) deactivate(ctx context.Context, serverName string) {
 func (p *Pool) deactivateWriter(serverName string, db string) {
 	p.log.Debugf(log.Pool, p.logId, "Deactivating writer %s for database %s", serverName, db)
 	p.router.InvalidateWriter(db, serverName)
+}
+
+func (p *Pool) updateCacheState() {
+	p.serversMut.Lock()
+	defer p.serversMut.Unlock()
+
+	allSupportSSR := true
+	for _, server := range p.servers {
+		server.executeForAllConnections(func(conn idb.Connection) {
+			if !conn.IsSsrEnabled() {
+				allSupportSSR = false
+			}
+		})
+		if !allSupportSSR {
+			break
+		}
+	}
+	p.cache.SetEnabled(allSupportSSR)
 }

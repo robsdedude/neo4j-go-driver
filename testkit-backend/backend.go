@@ -1302,6 +1302,7 @@ func (b *backend) handleRequest(req map[string]any) {
 				"Feature:Bolt:5.5",
 				"Feature:Bolt:5.6",
 				"Feature:Bolt:5.7",
+				"Feature:Bolt:5.8",
 				"Feature:Bolt:Patch:UTC",
 				"Feature:Impersonation",
 				//"Feature:TLS:1.1",
@@ -1313,6 +1314,8 @@ func (b *backend) handleRequest(req map[string]any) {
 				"Optimization:ConnectionReuse",
 				"Optimization:EagerTransactionBegin",
 				"Optimization:ExecuteQueryPipelining",
+				"Optimization:HomeDatabaseCache",
+				"Optimization:HomeDbCacheBasicPrincipalIsImpersonatedUser",
 				"Optimization:ImplicitDefaultArguments",
 				"Optimization:MinimalBookmarksSet",
 				"Optimization:MinimalResets",
@@ -1379,15 +1382,33 @@ func getAuth(authTokenMap map[string]any) (neo4j.AuthToken, error) {
 	case "bearer":
 		authToken = neo4j.BearerAuth(authTokenMap["credentials"].(string))
 	default:
-		parameters := authTokenMap["parameters"].(map[string]any)
-		if err := patchNumbersInMap(parameters); err != nil {
-			return neo4j.AuthToken{}, err
+		var parameters map[string]any
+		if v, ok := authTokenMap["parameters"].(map[string]any); ok {
+			parameters = v
+			if err := patchNumbersInMap(parameters); err != nil {
+				return neo4j.AuthToken{}, err
+			}
 		}
+
+		var scheme, principal, credentials, realm string
+		if v, ok := authTokenMap["scheme"].(string); ok {
+			scheme = v
+		}
+		if v, ok := authTokenMap["principal"].(string); ok {
+			principal = v
+		}
+		if v, ok := authTokenMap["credentials"].(string); ok {
+			credentials = v
+		}
+		if v, ok := authTokenMap["realm"].(string); ok {
+			realm = v
+		}
+
 		authToken = neo4j.CustomAuth(
-			authTokenMap["scheme"].(string),
-			authTokenMap["principal"].(string),
-			authTokenMap["credentials"].(string),
-			authTokenMap["realm"].(string),
+			scheme,
+			principal,
+			credentials,
+			realm,
 			parameters)
 	}
 	return authToken, nil
