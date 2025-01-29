@@ -587,12 +587,18 @@ func (s *sessionWithContext) getConnection(ctx context.Context, mode idb.AccessM
 			return nil, errorutil.WrapError(resolveErr)
 		}
 		serverList, err = s.getOrUpdateServers(ctx, mode, false)
+		if err != nil {
+			return nil, errorutil.WrapError(err)
+		}
 		s.resolveHomeDb = false
 	} else {
 		if s.homeDbGuess != "" && s.router.GetTable(s.homeDbGuess) != nil && s.cache.IsEnabled() {
 			// If a routing table is found via the cache: do not pin the cached home database to the session.
 			// Instead, send the next RUN/BEGIN request to the server without a set db.
 			serverList, err = s.getOrUpdateServers(ctx, mode, true)
+			if err != nil {
+				return nil, errorutil.WrapError(err)
+			}
 		} else {
 			// If a routing table for the cached db is not available, or there is no cached db: send a ROUTE
 			// message to the server, do not set the cached database as db for the route, instead route without a set db.
@@ -600,6 +606,9 @@ func (s *sessionWithContext) getConnection(ctx context.Context, mode idb.AccessM
 				return nil, errorutil.WrapError(resolveErr)
 			}
 			serverList, err = s.getOrUpdateServers(ctx, mode, s.cache.IsEnabled())
+			if err != nil {
+				return nil, errorutil.WrapError(err)
+			}
 		}
 	}
 
@@ -622,6 +631,9 @@ func (s *sessionWithContext) getConnection(ctx context.Context, mode idb.AccessM
 			return nil, errorutil.WrapError(resolveErr)
 		}
 		serverList, err = s.getOrUpdateServers(ctx, mode, false)
+		if err != nil {
+			return nil, errorutil.WrapError(err)
+		}
 
 		conn, err = s.pool.Borrow(
 			ctx,
