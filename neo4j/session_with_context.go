@@ -581,6 +581,7 @@ func (s *sessionWithContext) getConnection(ctx context.Context, mode idb.AccessM
 
 	var err error
 	var serverList []string
+	var usedHomeDbGuess bool
 
 	if s.config.DatabaseName != "" {
 		if resolveErr := s.resolveHomeDatabase(ctx); resolveErr != nil {
@@ -599,6 +600,7 @@ func (s *sessionWithContext) getConnection(ctx context.Context, mode idb.AccessM
 			if err != nil {
 				return nil, errorutil.WrapError(err)
 			}
+			usedHomeDbGuess = true
 		} else {
 			// If a routing table for the cached db is not available, or there is no cached db: send a ROUTE
 			// message to the server, do not set the cached database as db for the route, instead route without a set db.
@@ -624,7 +626,7 @@ func (s *sessionWithContext) getConnection(ctx context.Context, mode idb.AccessM
 
 	// Before using this connection we need to check if SSR is still enabled.
 	// If not we need to return the connection and resolve as normal.
-	if conn != nil && !conn.IsSsrEnabled() && s.homeDbGuess != "" {
+	if conn != nil && !conn.IsSsrEnabled() && usedHomeDbGuess {
 		s.pool.Return(ctx, conn)
 
 		if resolveErr := s.resolveHomeDatabase(ctx); resolveErr != nil {
