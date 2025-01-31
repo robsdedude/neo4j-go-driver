@@ -240,12 +240,8 @@ func newSessionWithContext(
 		fetchSize = sessConfig.FetchSize
 	}
 
-	// Get cached home database guess
-	var homeDbGuess = idb.DefaultDatabase
-	auth, err := token.Manager.GetAuthToken(ctx)
-	if err == nil {
-		homeDbGuess, _ = cache.Get(cache.ComputeKey(sessConfig.ImpersonatedUser, auth, token.FromSession))
-	}
+	key, _ := computeCacheKey(ctx, token, cache, sessConfig.ImpersonatedUser)
+	homeDbGuess, _ := cache.Get(key)
 
 	session := &sessionWithContext{
 		driverConfig:  config,
@@ -868,12 +864,9 @@ func (s *sessionWithContext) pinHomeDatabase(ctx context.Context, database strin
 	if !s.resolveHomeDb {
 		return
 	}
-	token, err := s.auth.Manager.GetAuthToken(ctx)
-	if err != nil {
-		return
-	}
-	user := s.cache.ComputeKey(s.config.ImpersonatedUser, token, s.auth.FromSession)
-	s.cache.Set(user, database)
+
+	key, _ := computeCacheKey(ctx, s.auth, s.cache, s.config.ImpersonatedUser)
+	s.cache.Set(key, database)
 
 	s.log.Debugf(log.Session, s.logId, "Resolved home database, uses db '%s'", database)
 	s.homeDbGuess = database
@@ -944,4 +937,15 @@ func validateTransactionConfig(config TransactionConfig) error {
 		return &UsageError{Message: err}
 	}
 	return nil
+}
+
+func computeCacheKey(ctx context.Context, token *idb.ReAuthToken, cache *homedb.Cache, impersonatedUser string) (string, error) {
+	if token.FromSession {
+		t, err := token.Manager.GetAuthToken(ctx)
+		if err != nil {
+			return "", err
+		}
+		return cache.ComputeKey(impersonatedUser, t, token.FromSession), nil
+	}
+	return cache.ComputeKey(impersonatedUser, AuthToken{}, token.FromSession), nil
 }
