@@ -564,100 +564,103 @@ func (s *sessionWithContext) getServers(mode idb.AccessMode) func() []string {
 }
 
 func (s *sessionWithContext) getConnection(ctx context.Context, mode idb.AccessMode, livenessCheckTimeout time.Duration) (idb.Connection, error) {
-	timeout := s.driverConfig.ConnectionAcquisitionTimeout
-	if timeout > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, timeout)
+	ctx, cancel := s.applyConnectionTimeout(ctx)
+	if cancel != nil {
 		defer cancel()
-		deadline, _ := ctx.Deadline()
-		s.log.Debugf(log.Session, s.logId, "connection acquisition timeout is %s, resolved deadline is: %s", timeout, deadline)
-	} else if deadline, ok := ctx.Deadline(); ok {
-		s.log.Debugf(log.Session, s.logId, "connection acquisition user-provided deadline is: %s", deadline)
 	}
 
-	var err error
-	var serverList []string
-	var usedHomeDbGuess bool
-
-	if s.config.DatabaseName != "" {
-		if resolveErr := s.resolveHomeDatabase(ctx); resolveErr != nil {
-			return nil, errorutil.WrapError(resolveErr)
-		}
-		serverList, err = s.getOrUpdateServers(ctx, mode, false)
-		if err != nil {
-			return nil, errorutil.WrapError(err)
-		}
-		s.resolveHomeDb = false
-	} else {
-		if s.homeDbGuess != "" && s.router.GetTable(s.homeDbGuess) != nil && s.cache.IsEnabled() {
-			// If a routing table is found via the cache: do not pin the cached home database to the session.
-			// Instead, send the next RUN/BEGIN request to the server without a set db.
-			serverList, err = s.getOrUpdateServers(ctx, mode, true)
-			if err != nil {
-				return nil, errorutil.WrapError(err)
-			}
-			usedHomeDbGuess = true
-		} else {
-			// If a routing table for the cached db is not available, or there is no cached db: send a ROUTE
-			// message to the server, do not set the cached database as db for the route, instead route without a set db.
-			if resolveErr := s.resolveHomeDatabase(ctx); resolveErr != nil {
-				return nil, errorutil.WrapError(resolveErr)
-			}
-			serverList, err = s.getOrUpdateServers(ctx, mode, s.cache.IsEnabled())
-			if err != nil {
-				return nil, errorutil.WrapError(err)
-			}
-		}
-	}
-
-	conn, err := s.pool.Borrow(
-		ctx,
-		// TODO should we have refactored s.getServers(mode)? Or is it better to just use serverList directly?
-		// What about other places that call s.getServers(mode) such as verifyAuthentication and getServerInfo?
-		func() []string { return serverList },
-		timeout != 0,
-		s.config.BoltLogger,
-		livenessCheckTimeout,
-		s.auth)
-
-	// Before using this connection we need to check if SSR is still enabled.
-	// If not we need to return the connection and resolve as normal.
-	if conn != nil && !conn.IsSsrEnabled() && usedHomeDbGuess {
-		s.pool.Return(ctx, conn)
-
-		if resolveErr := s.resolveHomeDatabase(ctx); resolveErr != nil {
-			return nil, errorutil.WrapError(resolveErr)
-		}
-		serverList, err = s.getOrUpdateServers(ctx, mode, false)
-		if err != nil {
-			return nil, errorutil.WrapError(err)
-		}
-
-		conn, err = s.pool.Borrow(
-			ctx,
-			func() []string { return serverList },
-			timeout != 0,
-			s.config.BoltLogger,
-			livenessCheckTimeout,
-			s.auth)
-	}
-
+	serverList, usedHomeDbGuess, err := s.getServerList(ctx, mode)
 	if err != nil {
 		return nil, errorutil.WrapError(err)
 	}
+
+	conn, err := s.borrowConnection(ctx, serverList, livenessCheckTimeout)
+	if err != nil {
+		return nil, errorutil.WrapError(err)
+	}
+
+	// Return the connection if SSR is disabled, and we used the home database guess, then resolve as normal.
+	if !conn.IsSsrEnabled() && usedHomeDbGuess {
+		s.pool.Return(ctx, conn)
+
+		serverList, _, err = s.getServerList(ctx, mode)
+		if err != nil {
+			return nil, errorutil.WrapError(err)
+		}
+
+		conn, err = s.borrowConnection(ctx, serverList, livenessCheckTimeout)
+		if err != nil {
+			return nil, errorutil.WrapError(err)
+		}
+	}
+
 	conn.SetPinHomeDatabaseCallback(s.pinHomeDatabaseCallback)
 
 	// Select database on server
 	if s.config.DatabaseName != idb.DefaultDatabase {
-		dbSelector, ok := conn.(idb.DatabaseSelector)
-		if !ok {
-			s.pool.Return(ctx, conn)
-			return nil, &UsageError{Message: "Database does not support multi-database"}
+		if err := s.selectDatabase(ctx, conn); err != nil {
+			return nil, err
 		}
-		dbSelector.SelectDatabase(s.config.DatabaseName)
 	}
 
 	return conn, nil
+}
+
+// applyConnectionTimeout sets a timeout on the context if configured.
+func (s *sessionWithContext) applyConnectionTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
+	timeout := s.driverConfig.ConnectionAcquisitionTimeout
+	if timeout > 0 {
+		ctx, cancel := context.WithTimeout(ctx, timeout)
+		deadline, _ := ctx.Deadline()
+		s.log.Debugf(log.Session, s.logId, "connection acquisition timeout is %s, resolved deadline is: %s", timeout, deadline)
+		return ctx, cancel
+	}
+	if deadline, ok := ctx.Deadline(); ok {
+		s.log.Debugf(log.Session, s.logId, "connection acquisition user-provided deadline is: %s", deadline)
+	}
+	return ctx, nil
+}
+
+// getServerList resolves the server list based on the session configuration.
+// It returns a list of servers, a boolean indicating whether the home database guess was used, and an error if resolution fails.
+func (s *sessionWithContext) getServerList(ctx context.Context, mode idb.AccessMode) ([]string, bool, error) {
+	if s.config.DatabaseName != "" {
+		if err := s.resolveHomeDatabase(ctx); err != nil {
+			return nil, false, err
+		}
+		serverList, err := s.getOrUpdateServers(ctx, mode, false)
+		return serverList, false, err
+	}
+
+	// Use cached home database if available
+	if s.homeDbGuess != "" && s.router.GetTable(s.homeDbGuess) != nil && s.cache.IsEnabled() {
+		serverList, err := s.getOrUpdateServers(ctx, mode, true)
+		return serverList, true, err
+	}
+
+	// Resolve home database if cache is unavailable
+	if err := s.resolveHomeDatabase(ctx); err != nil {
+		return nil, false, err
+	}
+	serverList, err := s.getOrUpdateServers(ctx, mode, s.cache.IsEnabled())
+	return serverList, false, err
+}
+
+// borrowConnection requests a connection from the pool using the provided `serverList`.
+func (s *sessionWithContext) borrowConnection(ctx context.Context, serverList []string, livenessCheckTimeout time.Duration) (idb.Connection, error) {
+	conn, err := s.pool.Borrow(ctx, func() []string { return serverList }, s.driverConfig.ConnectionAcquisitionTimeout != 0, s.config.BoltLogger, livenessCheckTimeout, s.auth)
+	return conn, err
+}
+
+// selectDatabase ensures the correct database is selected on the connection.
+func (s *sessionWithContext) selectDatabase(ctx context.Context, conn idb.Connection) error {
+	dbSelector, ok := conn.(idb.DatabaseSelector)
+	if !ok {
+		s.pool.Return(ctx, conn)
+		return &UsageError{Message: "Database does not support multi-database"}
+	}
+	dbSelector.SelectDatabase(s.config.DatabaseName)
+	return nil
 }
 
 func (s *sessionWithContext) retrieveBookmarks(ctx context.Context, conn idb.Connection, sentBookmarks Bookmarks) error {
