@@ -35,6 +35,7 @@ type RouterFake struct {
 	Err                    error
 	CleanUpHook            func()
 	GetNameOfDefaultDbHook func(user string) (string, error)
+	GetTableHook           func(database string) *db.RoutingTable
 }
 
 func (r *RouterFake) InvalidateReader(database string, server string) {
@@ -94,6 +95,9 @@ func (r *RouterFake) CleanUp() {
 	}
 }
 
-func (r *RouterFake) GetTable(string) *db.RoutingTable {
+func (r *RouterFake) GetTable(database string) *db.RoutingTable {
+	if r.GetTableHook != nil {
+		return r.GetTableHook(database)
+	}
 	return nil
 }

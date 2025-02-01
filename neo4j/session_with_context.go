@@ -638,7 +638,7 @@ func (s *sessionWithContext) getServerList(ctx context.Context, mode idb.AccessM
 		return serverList, true, err
 	}
 
-	// Resolve home database if cache is unavailable
+	// Resolve home database if cache is unavailable, there's no guess, or a table doesn't exist.
 	if err := s.resolveHomeDatabase(ctx); err != nil {
 		return nil, false, err
 	}
