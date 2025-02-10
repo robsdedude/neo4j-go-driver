@@ -647,9 +647,19 @@ func (s *sessionWithContext) getServerList(ctx context.Context, mode idb.AccessM
 }
 
 // borrowConnection requests a connection from the pool using the provided `serverList`.
-func (s *sessionWithContext) borrowConnection(ctx context.Context, serverList []string, livenessCheckTimeout time.Duration) (idb.Connection, error) {
-	conn, err := s.pool.Borrow(ctx, func() []string { return serverList }, s.driverConfig.ConnectionAcquisitionTimeout != 0, s.config.BoltLogger, livenessCheckTimeout, s.auth)
-	return conn, err
+func (s *sessionWithContext) borrowConnection(
+	ctx context.Context,
+	serverList []string,
+	livenessCheckTimeout time.Duration,
+) (idb.Connection, error) {
+	return s.pool.Borrow(
+		ctx,
+		func() []string { return serverList },
+		s.driverConfig.ConnectionAcquisitionTimeout != 0,
+		s.config.BoltLogger,
+		livenessCheckTimeout,
+		s.auth,
+	)
 }
 
 // selectDatabase ensures the correct database is selected on the connection.
