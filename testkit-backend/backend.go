@@ -1390,19 +1390,10 @@ func getAuth(authTokenMap map[string]any) (neo4j.AuthToken, error) {
 			}
 		}
 
-		var scheme, principal, credentials, realm string
-		if v, ok := authTokenMap["scheme"].(string); ok {
-			scheme = v
-		}
-		if v, ok := authTokenMap["principal"].(string); ok {
-			principal = v
-		}
-		if v, ok := authTokenMap["credentials"].(string); ok {
-			credentials = v
-		}
-		if v, ok := authTokenMap["realm"].(string); ok {
-			realm = v
-		}
+		scheme := mapGetString(authTokenMap, "scheme")
+		principal := mapGetString(authTokenMap, "principal")
+		credentials := mapGetString(authTokenMap, "credentials")
+		realm := mapGetString(authTokenMap, "realm")
 
 		authToken = neo4j.CustomAuth(
 			scheme,
@@ -1852,4 +1843,9 @@ func mapNotificationMinSeverityLevel(rawMinSeverityLevel string) (notifications.
 		return notifications.InformationLevel, nil
 	}
 	return "", fmt.Errorf("unknown min severity level %s", rawMinSeverityLevel)
+}
+
+func mapGetString(data map[string]any, key string) string {
+	out, _ := data[key].(string)
+	return out
 }

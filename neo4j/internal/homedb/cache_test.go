@@ -18,9 +18,10 @@
 package homedb
 
 import (
+	"testing"
+
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j/internal/auth"
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j/internal/testutil"
-	"testing"
 )
 
 func TestNewCache(outer *testing.T) {
@@ -107,49 +108,22 @@ func TestCache_Set(outer *testing.T) {
 	})
 }
 
-func TestCache_Delete(outer *testing.T) {
-	outer.Parallel()
-
-	outer.Run("delete existing entry", func(t *testing.T) {
-		cache, _ := NewCache(3)
-		cache.SetEnabled(true)
-		cache.Set("user1", "db1")
-		cache.Delete("user1")
-		db, exists := cache.Get("user1")
-		testutil.AssertFalse(t, exists)
-		testutil.AssertEmptyString(t, db)
-	})
-
-	outer.Run("delete non-existent entry", func(t *testing.T) {
-		cache, _ := NewCache(3)
-		cache.SetEnabled(true)
-		cache.Delete("user1")
-		testutil.AssertLen(t, cache.cache, 0)
-	})
-}
-
 func TestCache_ComputeKey(outer *testing.T) {
 	outer.Parallel()
 
 	outer.Run("impersonatedUser provided", func(t *testing.T) {
 		cache := &Cache{}
-		key := cache.ComputeKey("impersonatedUser", auth.Token{}, true)
+		key := cache.ComputeKey("impersonatedUser", nil)
 		testutil.AssertStringEqual(t, key, "basic:impersonatedUser")
 	})
 
-	outer.Run("auth is empty and fromSession is false", func(t *testing.T) {
+	outer.Run("no auth or impersonatedUser provided", func(t *testing.T) {
 		cache := &Cache{}
-		key := cache.ComputeKey("", auth.Token{}, false)
+		key := cache.ComputeKey("", nil)
 		testutil.AssertStringEqual(t, key, "DEFAULT")
 	})
 
-	outer.Run("auth is empty and fromSession is true", func(t *testing.T) {
-		cache := &Cache{}
-		key := cache.ComputeKey("", auth.Token{}, true)
-		testutil.AssertStringEqual(t, key, "DEFAULT")
-	})
-
-	outer.Run("auth scheme basic with principal and fromSession true", func(t *testing.T) {
+	outer.Run("auth scheme basic with principal", func(t *testing.T) {
 		cache := &Cache{}
 		authToken := auth.Token{
 			Tokens: map[string]any{
@@ -157,22 +131,22 @@ func TestCache_ComputeKey(outer *testing.T) {
 				"principal": "userPrincipal",
 			},
 		}
-		key := cache.ComputeKey("", authToken, true)
+		key := cache.ComputeKey("", &authToken)
 		testutil.AssertStringEqual(t, key, "basic:userPrincipal")
 	})
 
-	outer.Run("auth scheme basic without principal and fromSession true", func(t *testing.T) {
+	outer.Run("auth scheme basic without principal", func(t *testing.T) {
 		cache := &Cache{}
 		authToken := auth.Token{
 			Tokens: map[string]any{
 				"scheme": "basic",
 			},
 		}
-		key := cache.ComputeKey("", authToken, true)
+		key := cache.ComputeKey("", &authToken)
 		testutil.AssertStringEqual(t, key, "basic:")
 	})
 
-	outer.Run("auth scheme kerberos and fromSession true", func(t *testing.T) {
+	outer.Run("auth scheme kerberos", func(t *testing.T) {
 		cache := &Cache{}
 		authToken := auth.Token{
 			Tokens: map[string]any{
@@ -180,11 +154,11 @@ func TestCache_ComputeKey(outer *testing.T) {
 				"credentials": "kerberosToken",
 			},
 		}
-		key := cache.ComputeKey("", authToken, true)
+		key := cache.ComputeKey("", &authToken)
 		testutil.AssertStringEqual(t, key, "kerberos:kerberosToken")
 	})
 
-	outer.Run("auth scheme bearer and fromSession true", func(t *testing.T) {
+	outer.Run("auth scheme bearer", func(t *testing.T) {
 		cache := &Cache{}
 		authToken := auth.Token{
 			Tokens: map[string]any{
@@ -192,22 +166,22 @@ func TestCache_ComputeKey(outer *testing.T) {
 				"credentials": "bearerToken",
 			},
 		}
-		key := cache.ComputeKey("", authToken, true)
+		key := cache.ComputeKey("", &authToken)
 		testutil.AssertStringEqual(t, key, "bearer:bearerToken")
 	})
 
-	outer.Run("auth scheme none and fromSession true", func(t *testing.T) {
+	outer.Run("auth scheme none", func(t *testing.T) {
 		cache := &Cache{}
 		authToken := auth.Token{
 			Tokens: map[string]any{
 				"scheme": "none",
 			},
 		}
-		key := cache.ComputeKey("", authToken, true)
+		key := cache.ComputeKey("", &authToken)
 		testutil.AssertStringEqual(t, key, "none")
 	})
 
-	outer.Run("auth custom scheme with parameters and fromSession true", func(t *testing.T) {
+	outer.Run("auth custom scheme with parameters", func(t *testing.T) {
 		cache := &Cache{}
 		authToken := auth.Token{
 			Tokens: map[string]any{
@@ -221,40 +195,56 @@ func TestCache_ComputeKey(outer *testing.T) {
 				"principal":   "customPrincipal",
 			},
 		}
-		key := cache.ComputeKey("", authToken, true)
-		expectedKey := "scheme:customprincipal:customPrincipalcredentials:customCredrealm:customRealmparameters:key1:value1key2:value2"
+		key := cache.ComputeKey("", &authToken)
+		expectedKey := "scheme:custom,principal:customPrincipal,credentials:customCred,realm:customRealm,parameters:<key1>:value1;<key2>:value2;"
 		testutil.AssertStringEqual(t, key, expectedKey)
 	})
 
-	outer.Run("auth custom scheme without parameters and fromSession true", func(t *testing.T) {
+	outer.Run("auth custom scheme without parameters", func(t *testing.T) {
 		cache := &Cache{}
 		authToken := auth.Token{
 			Tokens: map[string]any{
 				"scheme": "custom",
 			},
 		}
-		key := cache.ComputeKey("", authToken, true)
-		expectedKey := "scheme:customprincipal:<nil>parameters:"
+		key := cache.ComputeKey("", &authToken)
+		expectedKey := "scheme:custom,principal:<nil>,,,parameters:"
 		testutil.AssertStringEqual(t, key, expectedKey)
 	})
 
-	outer.Run("no specific key determined, default returned, fromSession true", func(t *testing.T) {
+	outer.Run("auth custom scheme collision check", func(t *testing.T) {
 		cache := &Cache{}
-		authToken := auth.Token{
-			Tokens: map[string]any{},
+		token1 := auth.Token{
+			Tokens: map[string]any{
+				"scheme": "custom",
+				"parameters": map[string]any{
+					"key1:fun": "value1",
+				},
+			},
 		}
-		key := cache.ComputeKey("", authToken, true)
-		testutil.AssertStringEqual(t, key, "DEFAULT")
+		token2 := auth.Token{
+			Tokens: map[string]any{
+				"scheme": "custom",
+				"parameters": map[string]any{
+					"key1": "fun:value1",
+				},
+			},
+		}
+		key1 := cache.ComputeKey("", &token1)
+		key2 := cache.ComputeKey("", &token2)
+		testutil.AssertNotDeepEquals(t, key1, key2)
 	})
 
-	outer.Run("fromSession false always returns DEFAULT", func(t *testing.T) {
+	outer.Run("no scheme found, token is stringified", func(t *testing.T) {
 		cache := &Cache{}
 		authToken := auth.Token{
 			Tokens: map[string]any{
-				"scheme": "basic",
+				"c": "carrot",
+				"a": "apple",
+				"b": "banana",
 			},
 		}
-		key := cache.ComputeKey("", authToken, false)
-		testutil.AssertStringEqual(t, key, "DEFAULT")
+		key := cache.ComputeKey("", &authToken)
+		testutil.AssertStringEqual(t, key, "unknown:<a>:apple;<b>:banana;<c>:carrot;")
 	})
 }

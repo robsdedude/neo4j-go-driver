@@ -21,16 +21,15 @@ import (
 	"fmt"
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j/internal/auth"
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j/internal/errorutil"
+	"math"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
 
 // DefaultCacheMaxSize defines the maximum number of entries the cache can hold.
 const DefaultCacheMaxSize = 1000
-
-// cachePruneFraction defines the fraction of entries to prune when the cache exceeds its size.
-const cachePruneFraction = 0.1
 
 const keyScheme = "scheme"
 const schemeNone = "none"
@@ -48,10 +47,11 @@ type cacheEntry struct {
 }
 
 type Cache struct {
-	maxSize int
-	cache   map[string]*cacheEntry
-	enabled bool
-	mu      sync.RWMutex
+	maxSize     int
+	pruneFactor int
+	cache       map[string]*cacheEntry
+	enabled     bool
+	mu          sync.RWMutex
 }
 
 // NewCache creates and returns a new cache instance with the given max size.
@@ -59,10 +59,15 @@ func NewCache(maxSize int) (*Cache, error) {
 	if maxSize <= 0 {
 		return nil, &errorutil.UsageError{Message: "Maximum cache size must be greater than 0"}
 	}
+
+	c := 0.01
+	pruneFactor := int(math.Max(1, math.Round(c*float64(maxSize)*math.Log(float64(maxSize)))))
+
 	return &Cache{
-		maxSize: maxSize,
-		cache:   make(map[string]*cacheEntry),
-		enabled: false,
+		maxSize:     maxSize,
+		pruneFactor: pruneFactor,
+		cache:       make(map[string]*cacheEntry, maxSize+1),
+		enabled:     false,
 	}, nil
 }
 
@@ -87,10 +92,6 @@ func (c *Cache) Get(user string) (string, bool) {
 // Set adds or updates an entry in the cache.
 // If the cache exceeds its max size, it prunes the least recently used entries.
 func (c *Cache) Set(user string, database string) {
-	if !c.IsEnabled() {
-		return
-	}
-
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -101,58 +102,32 @@ func (c *Cache) Set(user string, database string) {
 	c.prune()
 }
 
-// Delete removes a specific user's entry from the cache.
-func (c *Cache) Delete(user string) {
-	if !c.IsEnabled() {
-		return
-	}
-
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	delete(c.cache, user)
-}
-
-// InvalidateDatabase removes all entries that reference a specific database.
-func (c *Cache) InvalidateDatabase(database string) {
-	if !c.IsEnabled() {
-		return
-	}
-
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	for user, entry := range c.cache {
-		if entry.database == database {
-			delete(c.cache, user)
-		}
-	}
-}
-
-// ComputeKey generates a cache key based on user impersonation, auth token, and session context.
-func (c *Cache) ComputeKey(impersonatedUser string, auth auth.Token, fromSession bool) string {
-	// If impersonated user is provided, use it as the key
+// ComputeKey generates a cache key based on user impersonation and an optional session auth token.
+func (c *Cache) ComputeKey(impersonatedUser string, sessionAuth *auth.Token) string {
+	// If an impersonated user is provided, use it as the key.
 	if impersonatedUser != "" {
 		return "basic:" + impersonatedUser
 	}
-	// If using driver level auth, return a default cache key to support AuthManager rotation.
-	if !fromSession {
+
+	// If no session authentication token is provided, return a default key.
+	if sessionAuth == nil {
 		return "DEFAULT"
 	}
 
 	// Process based on auth scheme
-	if scheme, ok := auth.Tokens[keyScheme].(string); ok {
+	if scheme, ok := sessionAuth.Tokens[keyScheme].(string); ok {
 		switch scheme {
 		case schemeBasic:
-			if principal, ok := auth.Tokens[keyPrincipal].(string); ok {
+			if principal, ok := sessionAuth.Tokens[keyPrincipal].(string); ok {
 				return "basic:" + principal
 			}
 			return "basic:"
 		case schemeKerberos:
-			if credentials, ok := auth.Tokens[keyCredentials].(string); ok {
+			if credentials, ok := sessionAuth.Tokens[keyCredentials].(string); ok {
 				return "kerberos:" + credentials
 			}
 		case schemeBearer:
-			if credentials, ok := auth.Tokens[keyCredentials].(string); ok {
+			if credentials, ok := sessionAuth.Tokens[keyCredentials].(string); ok {
 				return "bearer:" + credentials
 			}
 		case schemeNone:
@@ -160,32 +135,25 @@ func (c *Cache) ComputeKey(impersonatedUser string, auth auth.Token, fromSession
 		default:
 			// For custom schemes, construct the key
 			var orderedParams string
-			if params, ok := auth.Tokens[keyParameters].(map[string]any); ok {
-				keys := make([]string, 0, len(params))
-				for key := range params {
-					keys = append(keys, key)
-				}
-				sort.Strings(keys)
-				for _, key := range keys {
-					orderedParams += key + ":" + fmt.Sprintf("%v", params[key])
-				}
+			if params, ok := sessionAuth.Tokens[keyParameters].(map[string]any); ok {
+				orderedParams = serializeMap(params)
 			}
 			var credentialString, realmString string
-			if credentials, ok := auth.Tokens[keyCredentials].(string); ok && credentials != "" {
+			if credentials, ok := sessionAuth.Tokens[keyCredentials].(string); ok && credentials != "" {
 				credentialString = "credentials:" + credentials
 			}
-			if realm, ok := auth.Tokens[keyRealm].(string); ok && realm != "" {
+			if realm, ok := sessionAuth.Tokens[keyRealm].(string); ok && realm != "" {
 				realmString = "realm:" + realm
 			}
-			return fmt.Sprintf("%s:%s%s:%v%s%s%s:%s",
+			return fmt.Sprintf("%s:%s,%s:%v,%s,%s,%s:%s",
 				keyScheme, scheme,
-				keyPrincipal, auth.Tokens[keyPrincipal],
+				keyPrincipal, sessionAuth.Tokens[keyPrincipal],
 				credentialString, realmString,
 				keyParameters, orderedParams)
 		}
 	}
-	// If no specific key could be determined, return a default
-	return "DEFAULT"
+	// If no scheme could be found, fall back to serializing the token in a stable way.
+	return fmt.Sprintf("unknown:%v", serializeMap(sessionAuth.Tokens))
 }
 
 // SetEnabled enables or disables the cache.
@@ -226,12 +194,8 @@ func (c *Cache) prune() {
 		return entries[i].entry.lastUsed.Before(entries[j].entry.lastUsed)
 	})
 
-	// Calculate the number of entries to prune, ensuring at least one entry is removed
-	pruneCount := int(float64(c.maxSize) * cachePruneFraction)
-	if pruneCount == 0 {
-		pruneCount = 1
-	}
 	// Ensure we do not prune more than the number of entries in the cache
+	pruneCount := c.pruneFactor
 	if pruneCount > len(entries) {
 		pruneCount = len(entries)
 	}
@@ -240,4 +204,22 @@ func (c *Cache) prune() {
 	for i := 0; i < pruneCount; i++ {
 		delete(c.cache, entries[i].user)
 	}
+}
+
+// serializeMap creates a deterministic string representation of a map[string]any.
+func serializeMap(m map[string]any) string {
+	// Extract the keys from the map.
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	// Sort the keys to ensure a consistent order.
+	sort.Strings(keys)
+
+	// Build the string representation.
+	var builder strings.Builder
+	for _, k := range keys {
+		builder.WriteString(fmt.Sprintf("<%s>:%v;", k, m[k]))
+	}
+	return builder.String()
 }

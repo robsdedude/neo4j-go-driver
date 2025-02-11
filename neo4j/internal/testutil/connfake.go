@@ -74,7 +74,7 @@ type ConnFake struct {
 	ForceResetHook          func()
 	ReAuthHook              func(context.Context, *idb.ReAuthToken) error
 	SsrEnabled              bool
-	PinHomeDatabaseCallback func(string)
+	PinHomeDatabaseCallback func(context.Context, string)
 }
 
 func (c *ConnFake) Connect(
@@ -221,7 +221,7 @@ func (c *ConnFake) GetCurrentAuth() (auth.TokenManager, iauth.Token) {
 
 func (c *ConnFake) Telemetry(telemetry.API, func()) {}
 
-func (c *ConnFake) SetPinHomeDatabaseCallback(callback func(database string)) {
+func (c *ConnFake) SetPinHomeDatabaseCallback(callback func(ctx context.Context, database string)) {
 	c.PinHomeDatabaseCallback = callback
 }
 

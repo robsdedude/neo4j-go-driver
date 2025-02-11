@@ -121,7 +121,7 @@ type bolt5 struct {
 	errorListener           ConnectionErrorListener
 	telemetryEnabled        bool
 	ssrEnabled              bool
-	pinHomeDatabaseCallback func(string)
+	pinHomeDatabaseCallback func(context.Context, string)
 }
 
 func NewBolt5(
@@ -329,7 +329,7 @@ func (b *bolt5) TxBegin(
 		notificationConfig: txConfig.NotificationConfig,
 	}
 
-	b.queue.appendBegin(tx.toMeta(b.log, b.logId, b.Version()), b.beginResponseHandler())
+	b.queue.appendBegin(tx.toMeta(b.log, b.logId, b.Version()), b.beginResponseHandler(ctx))
 	if syncMessages {
 		if b.queue.send(ctx); b.err != nil {
 			return 0, b.err
@@ -569,7 +569,7 @@ func (b *bolt5) run(ctx context.Context, cypher string, params map[string]any, r
 	fetchSize := b.normalizeFetchSize(rawFetchSize)
 	stream := &stream{fetchSize: fetchSize}
 	b.Version()
-	b.queue.appendRun(cypher, params, tx.toMeta(b.log, b.logId, b.Version()), b.runResponseHandler(stream))
+	b.queue.appendRun(cypher, params, tx.toMeta(b.log, b.logId, b.Version()), b.runResponseHandler(ctx, stream))
 	b.queue.appendPullN(fetchSize, b.pullResponseHandler(stream))
 	if b.queue.send(ctx); b.err != nil {
 		return nil, b.err
@@ -857,7 +857,7 @@ func (b *bolt5) SetBoltLogger(boltLogger log.BoltLogger) {
 	b.queue.setBoltLogger(boltLogger)
 }
 
-func (b *bolt5) SetPinHomeDatabaseCallback(callback func(string)) {
+func (b *bolt5) SetPinHomeDatabaseCallback(callback func(context.Context, string)) {
 	b.pinHomeDatabaseCallback = callback
 }
 
@@ -1013,18 +1013,18 @@ func (b *bolt5) routeResponseHandler(table **idb.RoutingTable) responseHandler {
 	})
 }
 
-func (b *bolt5) beginResponseHandler() responseHandler {
+func (b *bolt5) beginResponseHandler(ctx context.Context) responseHandler {
 	return b.expectedSuccessHandler(func(beginSuccess *success) {
 		if b.pinHomeDatabaseCallback != nil && beginSuccess.db != "" {
-			b.pinHomeDatabaseCallback(beginSuccess.db)
+			b.pinHomeDatabaseCallback(ctx, beginSuccess.db)
 		}
 	})
 }
 
-func (b *bolt5) runResponseHandler(stream *stream) responseHandler {
+func (b *bolt5) runResponseHandler(ctx context.Context, stream *stream) responseHandler {
 	return b.expectedSuccessHandler(func(runSuccess *success) {
 		if b.pinHomeDatabaseCallback != nil && runSuccess.db != "" {
-			b.pinHomeDatabaseCallback(runSuccess.db)
+			b.pinHomeDatabaseCallback(ctx, runSuccess.db)
 		}
 		stream.attached = true
 		stream.keys = runSuccess.fields

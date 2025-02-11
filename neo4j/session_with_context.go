@@ -20,6 +20,7 @@ package neo4j
 import (
 	"context"
 	"fmt"
+	"github.com/neo4j/neo4j-go-driver/v5/neo4j/db"
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j/internal/homedb"
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j/internal/racing"
 	"math"
@@ -209,7 +210,7 @@ type sessionWithContext struct {
 	pool                    sessionPool
 	router                  sessionRouter
 	cache                   *homedb.Cache
-	pinHomeDatabaseCallback func(string)
+	pinHomeDatabaseCallback func(context.Context, string)
 	explicitTx              *explicitTransaction
 	autocommitTx            *autocommitTransaction
 	sleep                   func(context.Context, time.Duration) error
@@ -240,8 +241,17 @@ func newSessionWithContext(
 		fetchSize = sessConfig.FetchSize
 	}
 
-	key, _ := computeCacheKey(ctx, token, cache, sessConfig.ImpersonatedUser)
-	homeDbGuess, _ := cache.Get(key)
+	key, err := computeCacheKey(ctx, token, cache, sessConfig.ImpersonatedUser)
+	if err != nil {
+		logger.Warnf(log.Session, logId, "Failed to compute cache key: %v", err)
+	}
+
+	homeDbGuess, found := cache.Get(key)
+	if found {
+		logger.Debugf(log.Session, logId, "Home database guess retrieved from cache: '%s' for key '%s'", homeDbGuess, key)
+	} else {
+		logger.Debugf(log.Session, logId, "No home database guess found in cache for key '%s'", key)
+	}
 
 	session := &sessionWithContext{
 		driverConfig:  config,
@@ -260,7 +270,7 @@ func newSessionWithContext(
 		fetchSize:     fetchSize,
 		auth:          token,
 	}
-	session.pinHomeDatabaseCallback = func(database string) {
+	session.pinHomeDatabaseCallback = func(ctx context.Context, database string) {
 		session.pinHomeDatabase(ctx, database)
 	}
 	return session
@@ -541,15 +551,19 @@ func (s *sessionWithContext) executeTransactionFunction(
 	return true, x
 }
 
-func (s *sessionWithContext) getOrUpdateServers(ctx context.Context, mode idb.AccessMode, useHomeDbGuess bool) ([]string, error) {
+func (s *sessionWithContext) getOrUpdateServers(ctx context.Context, mode idb.AccessMode, isHomeDbGuess bool) ([]string, error) {
 	database := s.config.DatabaseName
-	if useHomeDbGuess {
+	if isHomeDbGuess {
 		database = s.homeDbGuess
 	}
+	dbSelection := idb.DatabaseSelection{
+		Name:          database,
+		IsHomeDbGuess: isHomeDbGuess,
+	}
 	if mode == idb.ReadMode {
-		return s.router.GetOrUpdateReaders(ctx, s.getBookmarks, database, s.auth, s.config.BoltLogger, useHomeDbGuess)
+		return s.router.GetOrUpdateReaders(ctx, s.getBookmarks, dbSelection, s.auth, s.config.BoltLogger)
 	} else {
-		return s.router.GetOrUpdateWriters(ctx, s.getBookmarks, database, s.auth, s.config.BoltLogger, useHomeDbGuess)
+		return s.router.GetOrUpdateWriters(ctx, s.getBookmarks, dbSelection, s.auth, s.config.BoltLogger)
 	}
 }
 
@@ -581,6 +595,13 @@ func (s *sessionWithContext) getConnection(ctx context.Context, mode idb.AccessM
 
 	// Return the connection if SSR is disabled, and we used the home database guess, then resolve as normal.
 	if !conn.IsSsrEnabled() && usedHomeDbGuess {
+		s.log.Debugf(
+			log.Session,
+			s.logId,
+			"Connection without SSR enabled was acquired using home database guess '%s', "+
+				"falling back to resolving as normal",
+			s.homeDbGuess,
+		)
 		s.pool.Return(ctx, conn)
 
 		serverList, _, err = s.getServerList(ctx, mode)
@@ -625,24 +646,23 @@ func (s *sessionWithContext) applyConnectionTimeout(ctx context.Context) (contex
 // It returns a list of servers, a boolean indicating whether the home database guess was used, and an error if resolution fails.
 func (s *sessionWithContext) getServerList(ctx context.Context, mode idb.AccessMode) ([]string, bool, error) {
 	if s.config.DatabaseName != "" {
-		if err := s.resolveHomeDatabase(ctx); err != nil {
-			return nil, false, err
-		}
 		serverList, err := s.getOrUpdateServers(ctx, mode, false)
 		return serverList, false, err
 	}
 
 	// Use cached home database if available
 	if s.homeDbGuess != "" && s.router.GetTable(s.homeDbGuess) != nil && s.cache.IsEnabled() {
+		s.log.Debugf(log.Session, s.logId, "Using cached home database guess '%s' for server list resolution", s.homeDbGuess)
 		serverList, err := s.getOrUpdateServers(ctx, mode, true)
 		return serverList, true, err
 	}
 
 	// Resolve home database if cache is unavailable, there's no guess, or a table doesn't exist.
+	s.log.Debugf(log.Session, s.logId, "No valid cached home database guess available, resolving home database")
 	if err := s.resolveHomeDatabase(ctx); err != nil {
 		return nil, false, err
 	}
-	serverList, err := s.getOrUpdateServers(ctx, mode, s.cache.IsEnabled())
+	serverList, err := s.getOrUpdateServers(ctx, mode, false)
 	return serverList, false, err
 }
 
@@ -666,8 +686,11 @@ func (s *sessionWithContext) borrowConnection(
 func (s *sessionWithContext) selectDatabase(ctx context.Context, conn idb.Connection) error {
 	dbSelector, ok := conn.(idb.DatabaseSelector)
 	if !ok {
+		err := &db.FeatureNotSupportedError{
+			Server: conn.ServerName(), Feature: "multi-database", Reason: "requires at least server v4",
+		}
 		s.pool.Return(ctx, conn)
-		return &UsageError{Message: "Database does not support multi-database"}
+		return err
 	}
 	dbSelector.SelectDatabase(s.config.DatabaseName)
 	return nil
@@ -878,8 +901,12 @@ func (s *sessionWithContext) pinHomeDatabase(ctx context.Context, database strin
 		return
 	}
 
-	key, _ := computeCacheKey(ctx, s.auth, s.cache, s.config.ImpersonatedUser)
-	s.cache.Set(key, database)
+	if key, err := computeCacheKey(ctx, s.auth, s.cache, s.config.ImpersonatedUser); err == nil {
+		s.cache.Set(key, database)
+		s.log.Debugf(log.Session, s.logId, "Cached home database '%s' for key '%s'", database, key)
+	} else {
+		s.log.Warnf(log.Session, s.logId, "Failed to compute cache key: %v", err)
+	}
 
 	s.log.Debugf(log.Session, s.logId, "Resolved home database, uses db '%s'", database)
 	s.homeDbGuess = database
@@ -958,7 +985,7 @@ func computeCacheKey(ctx context.Context, token *idb.ReAuthToken, cache *homedb.
 		if err != nil {
 			return "", err
 		}
-		return cache.ComputeKey(impersonatedUser, t, token.FromSession), nil
+		return cache.ComputeKey(impersonatedUser, &t), nil
 	}
-	return cache.ComputeKey(impersonatedUser, AuthToken{}, token.FromSession), nil
+	return cache.ComputeKey(impersonatedUser, nil), nil
 }

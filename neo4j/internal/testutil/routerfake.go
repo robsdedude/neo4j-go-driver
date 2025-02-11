@@ -60,9 +60,9 @@ func (r *RouterFake) Invalidate(database string) {
 	r.Invalidated = true
 }
 
-func (r *RouterFake) GetOrUpdateReaders(_ context.Context, bookmarksFn func(context.Context) ([]string, error), database string, _ *db.ReAuthToken, _ log.BoltLogger, _ bool) ([]string, error) {
+func (r *RouterFake) GetOrUpdateReaders(_ context.Context, bookmarksFn func(context.Context) ([]string, error), dbSelection db.DatabaseSelection, _ *db.ReAuthToken, _ log.BoltLogger) ([]string, error) {
 	if r.GetOrUpdateReadersHook != nil {
-		return r.GetOrUpdateReadersHook(bookmarksFn, database)
+		return r.GetOrUpdateReadersHook(bookmarksFn, dbSelection.Name)
 	}
 	return r.GetOrUpdateReadersRet, r.Err
 }
@@ -71,9 +71,9 @@ func (r *RouterFake) Readers(string) []string {
 	return nil
 }
 
-func (r *RouterFake) GetOrUpdateWriters(_ context.Context, bookmarksFn func(context.Context) ([]string, error), database string, _ *db.ReAuthToken, _ log.BoltLogger, _ bool) ([]string, error) {
+func (r *RouterFake) GetOrUpdateWriters(_ context.Context, bookmarksFn func(context.Context) ([]string, error), dbSelection db.DatabaseSelection, _ *db.ReAuthToken, _ log.BoltLogger) ([]string, error) {
 	if r.GetOrUpdateWritersHook != nil {
-		return r.GetOrUpdateWritersHook(bookmarksFn, database)
+		return r.GetOrUpdateWritersHook(bookmarksFn, dbSelection.Name)
 	}
 	return r.GetOrUpdateWritersRet, r.Err
 }

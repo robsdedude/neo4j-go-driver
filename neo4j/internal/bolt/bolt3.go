@@ -873,7 +873,7 @@ func (b *bolt3) Telemetry(telemetry.API, func()) {
 	// TELEMETRY not support by this protocol version, so we ignore it.
 }
 
-func (b *bolt3) SetPinHomeDatabaseCallback(func(string)) {
+func (b *bolt3) SetPinHomeDatabaseCallback(func(context.Context, string)) {
 	// Home database not supported by this protocol version, so we ignore it.
 }
 
