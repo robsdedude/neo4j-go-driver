@@ -149,7 +149,14 @@ func (r *Router) GetTable(database string) *idb.RoutingTable {
 	return r.getTableLocked(dbRouter)
 }
 
-func (r *Router) getOrUpdateTable(ctx context.Context, bookmarksFn func(context.Context) ([]string, error), dbSelection idb.DatabaseSelection, auth *idb.ReAuthToken, boltLogger log.BoltLogger) (*idb.RoutingTable, error) {
+func (r *Router) getOrUpdateTable(
+	ctx context.Context,
+	bookmarksFn func(context.Context) ([]string, error),
+	dbSelection idb.DatabaseSelection,
+	auth *idb.ReAuthToken,
+	boltLogger log.BoltLogger,
+	onRoutingTableUpdated func(string),
+) (*idb.RoutingTable, error) {
 	r.dbRoutersMut.Lock()
 	var unlock = new(sync.Once)
 	defer unlock.Do(r.dbRoutersMut.Unlock)
@@ -183,6 +190,9 @@ func (r *Router) getOrUpdateTable(ctx context.Context, bookmarksFn func(context.
 			targetDatabase = ""
 		}
 		table, err := r.updateTable(ctx, bookmarksFn, targetDatabase, auth, boltLogger, dbRouter)
+		if onRoutingTableUpdated != nil {
+			onRoutingTableUpdated(table.DatabaseName)
+		}
 		r.dbRoutersMut.Lock()
 		*unlock = sync.Once{}
 		// notify all waiters
@@ -220,8 +230,15 @@ func (r *Router) updateTable(ctx context.Context, bookmarksFn func(context.Conte
 	return table, nil
 }
 
-func (r *Router) GetOrUpdateReaders(ctx context.Context, bookmarks func(context.Context) ([]string, error), dbSelection idb.DatabaseSelection, auth *idb.ReAuthToken, boltLogger log.BoltLogger) ([]string, error) {
-	table, err := r.getOrUpdateTable(ctx, bookmarks, dbSelection, auth, boltLogger)
+func (r *Router) GetOrUpdateReaders(
+	ctx context.Context,
+	bookmarks func(context.Context) ([]string, error),
+	dbSelection idb.DatabaseSelection,
+	auth *idb.ReAuthToken,
+	boltLogger log.BoltLogger,
+	onRoutingTableUpdated func(string),
+) ([]string, error) {
+	table, err := r.getOrUpdateTable(ctx, bookmarks, dbSelection, auth, boltLogger, onRoutingTableUpdated)
 	if err != nil {
 		return nil, err
 	}
@@ -236,7 +253,7 @@ func (r *Router) GetOrUpdateReaders(ctx context.Context, bookmarks func(context.
 		r.log.Infof(log.Router, r.logId, "Invalidating routing table, no readers")
 		r.Invalidate(table.DatabaseName)
 		r.sleep(100 * time.Millisecond)
-		table, err = r.getOrUpdateTable(ctx, bookmarks, dbSelection, auth, boltLogger)
+		table, err = r.getOrUpdateTable(ctx, bookmarks, dbSelection, auth, boltLogger, onRoutingTableUpdated)
 		if err != nil {
 			return nil, err
 		}
@@ -256,8 +273,15 @@ func (r *Router) Readers(database string) []string {
 	return table.Readers
 }
 
-func (r *Router) GetOrUpdateWriters(ctx context.Context, bookmarks func(context.Context) ([]string, error), dbSelection idb.DatabaseSelection, auth *idb.ReAuthToken, boltLogger log.BoltLogger) ([]string, error) {
-	table, err := r.getOrUpdateTable(ctx, bookmarks, dbSelection, auth, boltLogger)
+func (r *Router) GetOrUpdateWriters(
+	ctx context.Context,
+	bookmarks func(context.Context) ([]string, error),
+	dbSelection idb.DatabaseSelection,
+	auth *idb.ReAuthToken,
+	boltLogger log.BoltLogger,
+	onRoutingTableUpdated func(string),
+) ([]string, error) {
+	table, err := r.getOrUpdateTable(ctx, bookmarks, dbSelection, auth, boltLogger, onRoutingTableUpdated)
 	if err != nil {
 		return nil, err
 	}
@@ -272,7 +296,7 @@ func (r *Router) GetOrUpdateWriters(ctx context.Context, bookmarks func(context.
 		r.log.Infof(log.Router, r.logId, "Invalidating routing table, no writers")
 		r.Invalidate(dbSelection.Name)
 		r.sleep(100 * time.Millisecond)
-		table, err = r.getOrUpdateTable(ctx, bookmarks, dbSelection, auth, boltLogger)
+		table, err = r.getOrUpdateTable(ctx, bookmarks, dbSelection, auth, boltLogger, onRoutingTableUpdated)
 		if err != nil {
 			return nil, err
 		}
@@ -377,9 +401,12 @@ func (r *Router) CleanUp() {
 	}
 }
 
-func (r *Router) storeRoutingTable(ctx context.Context, database string, table *idb.RoutingTable, now time.Time) error {
+func (r *Router) storeRoutingTable(_ context.Context, database string, table *idb.RoutingTable, now time.Time) error {
 	r.dbRoutersMut.Lock()
 	defer r.dbRoutersMut.Unlock()
+	if database == "" {
+		database = table.DatabaseName
+	}
 	r.dbRouters[database] = &databaseRouter{
 		table:   table,
 		dueUnix: now.Add(time.Duration(table.TimeToLive) * time.Second).Unix(),

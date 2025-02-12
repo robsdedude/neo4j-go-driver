@@ -551,7 +551,12 @@ func (s *sessionWithContext) executeTransactionFunction(
 	return true, x
 }
 
-func (s *sessionWithContext) getOrUpdateServers(ctx context.Context, mode idb.AccessMode, isHomeDbGuess bool) ([]string, error) {
+func (s *sessionWithContext) getOrUpdateServers(
+	ctx context.Context,
+	mode idb.AccessMode,
+	isHomeDbGuess bool,
+	onRoutingTableUpdated func(string),
+) ([]string, error) {
 	database := s.config.DatabaseName
 	if isHomeDbGuess {
 		database = s.homeDbGuess
@@ -561,9 +566,9 @@ func (s *sessionWithContext) getOrUpdateServers(ctx context.Context, mode idb.Ac
 		IsHomeDbGuess: isHomeDbGuess,
 	}
 	if mode == idb.ReadMode {
-		return s.router.GetOrUpdateReaders(ctx, s.getBookmarks, dbSelection, s.auth, s.config.BoltLogger)
+		return s.router.GetOrUpdateReaders(ctx, s.getBookmarks, dbSelection, s.auth, s.config.BoltLogger, onRoutingTableUpdated)
 	} else {
-		return s.router.GetOrUpdateWriters(ctx, s.getBookmarks, dbSelection, s.auth, s.config.BoltLogger)
+		return s.router.GetOrUpdateWriters(ctx, s.getBookmarks, dbSelection, s.auth, s.config.BoltLogger, onRoutingTableUpdated)
 	}
 }
 
@@ -620,6 +625,7 @@ func (s *sessionWithContext) getConnection(ctx context.Context, mode idb.AccessM
 	// Select database on server
 	if s.config.DatabaseName != idb.DefaultDatabase {
 		if err := s.selectDatabase(ctx, conn); err != nil {
+			s.pool.Return(ctx, conn)
 			return nil, err
 		}
 	}
@@ -646,14 +652,16 @@ func (s *sessionWithContext) applyConnectionTimeout(ctx context.Context) (contex
 // It returns a list of servers, a boolean indicating whether the home database guess was used, and an error if resolution fails.
 func (s *sessionWithContext) getServerList(ctx context.Context, mode idb.AccessMode) ([]string, bool, error) {
 	if s.config.DatabaseName != "" {
-		serverList, err := s.getOrUpdateServers(ctx, mode, false)
+		serverList, err := s.getOrUpdateServers(ctx, mode, false, nil)
 		return serverList, false, err
 	}
 
 	// Use cached home database if available
-	if s.homeDbGuess != "" && s.router.GetTable(s.homeDbGuess) != nil && s.cache.IsEnabled() {
+	if s.homeDbGuess != "" && s.cache.IsEnabled() {
 		s.log.Debugf(log.Session, s.logId, "Using cached home database guess '%s' for server list resolution", s.homeDbGuess)
-		serverList, err := s.getOrUpdateServers(ctx, mode, true)
+		serverList, err := s.getOrUpdateServers(ctx, mode, true, func(database string) {
+			s.pinHomeDatabase(ctx, database)
+		})
 		return serverList, true, err
 	}
 
@@ -662,7 +670,7 @@ func (s *sessionWithContext) getServerList(ctx context.Context, mode idb.AccessM
 	if err := s.resolveHomeDatabase(ctx); err != nil {
 		return nil, false, err
 	}
-	serverList, err := s.getOrUpdateServers(ctx, mode, false)
+	serverList, err := s.getOrUpdateServers(ctx, mode, false, nil)
 	return serverList, false, err
 }
 
@@ -689,7 +697,6 @@ func (s *sessionWithContext) selectDatabase(ctx context.Context, conn idb.Connec
 		err := &db.FeatureNotSupportedError{
 			Server: conn.ServerName(), Feature: "multi-database", Reason: "requires at least server v4",
 		}
-		s.pool.Return(ctx, conn)
 		return err
 	}
 	dbSelector.SelectDatabase(s.config.DatabaseName)
@@ -833,7 +840,7 @@ func (s *sessionWithContext) getServerInfo(ctx context.Context) (ServerInfo, err
 	if err := s.resolveHomeDatabase(ctx); err != nil {
 		return nil, errorutil.WrapError(err)
 	}
-	_, err := s.getOrUpdateServers(ctx, idb.ReadMode, false)
+	_, err := s.getOrUpdateServers(ctx, idb.ReadMode, false, nil)
 	if err != nil {
 		return nil, errorutil.WrapError(err)
 	}
@@ -856,7 +863,7 @@ func (s *sessionWithContext) getServerInfo(ctx context.Context) (ServerInfo, err
 }
 
 func (s *sessionWithContext) verifyAuthentication(ctx context.Context) error {
-	_, err := s.getOrUpdateServers(ctx, idb.ReadMode, false)
+	_, err := s.getOrUpdateServers(ctx, idb.ReadMode, false, nil)
 	if err != nil {
 		return errorutil.WrapError(err)
 	}
