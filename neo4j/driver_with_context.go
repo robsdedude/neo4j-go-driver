@@ -302,12 +302,12 @@ type sessionRouter interface {
 	// note: bookmarks are lazily supplied, only when a new routing table needs to be fetched
 	// this is needed because custom bookmark managers may provide bookmarks from external systems
 	// they should not be called when it is not needed (e.g. when a routing table is cached)
-	GetOrUpdateReaders(ctx context.Context, bookmarks func(context.Context) ([]string, error), dbSelection idb.DatabaseSelection, auth *idb.ReAuthToken, boltLogger log.BoltLogger) ([]string, error)
+	GetOrUpdateReaders(ctx context.Context, bookmarks func(context.Context) ([]string, error), dbSelection idb.DatabaseSelection, auth *idb.ReAuthToken, boltLogger log.BoltLogger, onRoutingTableUpdated func(string)) ([]string, error)
 	// Readers returns the list of servers that can serve reads on the requested database.
 	Readers(database string) []string
 	// GetOrUpdateWriters returns the list of servers that can serve writes on the requested database.
 	// note: bookmarks are lazily supplied, see Readers documentation to learn why
-	GetOrUpdateWriters(ctx context.Context, bookmarks func(context.Context) ([]string, error), dbSelection idb.DatabaseSelection, auth *idb.ReAuthToken, boltLogger log.BoltLogger) ([]string, error)
+	GetOrUpdateWriters(ctx context.Context, bookmarks func(context.Context) ([]string, error), dbSelection idb.DatabaseSelection, auth *idb.ReAuthToken, boltLogger log.BoltLogger, onRoutingTableUpdated func(string)) ([]string, error)
 	// Writers returns the list of servers that can serve writes on the requested database.
 	Writers(database string) []string
 	// GetNameOfDefaultDatabase returns the name of the default database for the specified user.
