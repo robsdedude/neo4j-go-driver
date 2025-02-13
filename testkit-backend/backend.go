@@ -52,6 +52,7 @@ type backend struct {
 	explicitTransactions            map[string]neo4j.ExplicitTransaction
 	recordedErrors                  map[string]error
 	resolvedAddresses               map[string][]any
+	dnsResolutions                  map[string][]any
 	authTokenManagers               map[string]auth.TokenManager
 	resolvedGetAuthTokens           map[string]neo4j.AuthToken
 	resolvedHandleSecurityException map[string]bool
@@ -148,6 +149,7 @@ func newBackend(rd *bufio.Reader, wr io.Writer) *backend {
 		explicitTransactions:            make(map[string]neo4j.ExplicitTransaction),
 		recordedErrors:                  make(map[string]error),
 		resolvedAddresses:               make(map[string][]any),
+		dnsResolutions:                  make(map[string][]any),
 		authTokenManagers:               make(map[string]auth.TokenManager),
 		resolvedGetAuthTokens:           make(map[string]neo4j.AuthToken),
 		resolvedHandleSecurityException: make(map[string]bool),
@@ -496,6 +498,27 @@ func (b *backend) customAddressResolverFunction() config.ServerAddressResolver {
 	}
 }
 
+func (b *backend) dnsResolverFunction() func(address string) []string {
+	return func(address string) []string {
+		id := b.nextId()
+		b.writeResponse("DomainNameResolutionRequired", map[string]string{
+			"id":   id,
+			"name": address,
+		})
+		for {
+			b.process()
+			if addresses, ok := b.dnsResolutions[id]; ok {
+				delete(b.dnsResolutions, id)
+				result := make([]string, len(addresses))
+				for i, address := range addresses {
+					result[i] = address.(string)
+				}
+				return result
+			}
+		}
+	}
+}
+
 type serverAddress struct {
 	hostname string
 	port     string
@@ -532,6 +555,11 @@ func (b *backend) handleRequest(req map[string]any) {
 
 	fmt.Printf("REQ: %s %s\n", name, dataJson)
 	switch name {
+
+	case "DomainNameResolutionCompleted":
+		requestId := data["requestId"].(string)
+		addresses := data["addresses"].([]any)
+		b.dnsResolutions[requestId] = addresses
 
 	case "ResolverResolutionCompleted":
 		requestId := data["requestId"].(string)
@@ -637,6 +665,11 @@ func (b *backend) handleRequest(req map[string]any) {
 			b.writeError(err)
 			return
 		}
+
+		if data["domainNameResolverRegistered"] != nil && data["domainNameResolverRegistered"].(bool) {
+			neo4j.RegisterDnsResolver(driver, b.dnsResolverFunction())
+		}
+
 		idKey := b.nextId()
 		b.drivers[idKey] = driver
 		b.writeResponse("Driver", map[string]any{"id": idKey})
@@ -1690,10 +1723,6 @@ func testSkips() map[string]string {
 		"stub.routing.test_routing_v3.RoutingV3.test_should_fail_when_writing_on_unexpectedly_interrupting_writer_on_pull_using_tx_run":            "Won't fix - only Bolt 3 affected (not officially supported by this driver): broken servers are not removed from routing table",
 		"stub.routing.test_routing_v3.RoutingV3.test_should_fail_when_writing_on_unexpectedly_interrupting_writer_on_run_using_tx_run":             "Won't fix - only Bolt 3 affected (not officially supported by this driver): broken servers are not removed from routing table",
 		"stub.routing.test_routing_v3.RoutingV3.test_should_fail_when_writing_on_unexpectedly_interrupting_writer_using_tx_run":                    "Won't fix - only Bolt 3 affected (not officially supported by this driver): broken servers are not removed from routing table",
-
-		// Missing message support in testkit backend
-		"stub.routing.*.*.test_should_request_rt_from_all_initial_routers_until_successful_on_unknown_failure":       "Add DNS resolver TestKit message and connection timeout support",
-		"stub.routing.*.*.test_should_request_rt_from_all_initial_routers_until_successful_on_authorization_expired": "Add DNS resolver TestKit message and connection timeout support",
 
 		// To fix/to decide whether to fix
 		"stub.routing.test_routing_v*.RoutingV*.test_should_revert_to_initial_router_if_known_router_throws_protocol_errors": "Driver always uses configured URL first and custom resolver only if that fails",
