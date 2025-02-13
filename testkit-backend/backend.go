@@ -29,6 +29,7 @@ import (
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j/notifications"
 	"io"
 	"math"
+	"net"
 	"net/url"
 	"regexp"
 	"strings"
@@ -501,9 +502,16 @@ func (b *backend) customAddressResolverFunction() config.ServerAddressResolver {
 func (b *backend) dnsResolverFunction() func(address string) []string {
 	return func(address string) []string {
 		id := b.nextId()
+		host, port, err := net.SplitHostPort(address)
+		if err != nil {
+			b.writeError(fmt.Errorf(
+				"couldn't parse address for custom DNS resulution (probably a bug in backend): %w", err,
+			))
+			return nil
+		}
 		b.writeResponse("DomainNameResolutionRequired", map[string]string{
 			"id":   id,
-			"name": address,
+			"name": host,
 		})
 		for {
 			b.process()
@@ -511,7 +519,7 @@ func (b *backend) dnsResolverFunction() func(address string) []string {
 				delete(b.dnsResolutions, id)
 				result := make([]string, len(addresses))
 				for i, address := range addresses {
-					result[i] = address.(string)
+					result[i] = fmt.Sprintf("%s:%s", address, port)
 				}
 				return result
 			}
