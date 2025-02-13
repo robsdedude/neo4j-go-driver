@@ -37,6 +37,7 @@ type Connector struct {
 	SkipEncryption     bool
 	SkipVerify         bool
 	Log                log.Logger
+	LogId              string
 	RoutingContext     map[string]string
 	Network            string
 	Config             *config.Config
@@ -140,6 +141,7 @@ func (c Connector) createConnection(ctx context.Context, address string) (net.Co
 	}
 
 	if c.TestKitDnsResolver == nil {
+		c.Log.Debugf(log.Driver, c.LogId, "dialing %s", address)
 		return dialer.DialContext(ctx, c.Network, address)
 	}
 
@@ -156,6 +158,7 @@ func (c Connector) createConnection(ctx context.Context, address string) (net.Co
 	for _, address := range addresses {
 		con, err = dialer.DialContext(ctx, c.Network, address)
 		if err == nil {
+			c.Log.Debugf(log.Driver, c.LogId, "dialing %s", address)
 			return con, nil
 		}
 	}
