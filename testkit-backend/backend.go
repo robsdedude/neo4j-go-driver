@@ -1733,14 +1733,15 @@ func testSkips() map[string]string {
 		"stub.routing.test_routing_v3.RoutingV3.test_should_fail_when_writing_on_unexpectedly_interrupting_writer_using_tx_run":                    "Won't fix - only Bolt 3 affected (not officially supported by this driver): broken servers are not removed from routing table",
 
 		// To fix/to decide whether to fix
-		"stub.routing.test_routing_v*.RoutingV*.test_should_revert_to_initial_router_if_known_router_throws_protocol_errors": "Driver always uses configured URL first and custom resolver only if that fails",
-		"stub.routing.test_routing_v*.RoutingV*.test_should_read_successfully_from_reachable_db_after_trying_unreachable_db": "Driver retries to fetch a routing table up to 100 times if it's empty",
-		"stub.routing.test_routing_v*.RoutingV*.test_should_write_successfully_after_leader_switch_using_tx_run":             "Driver retries to fetch a routing table up to 100 times if it's empty",
-		"stub.routing.test_routing_v*.RoutingV*.test_should_fail_when_writing_without_writers_using_session_run":             "Driver retries to fetch a routing table up to 100 times if it's empty",
-		"stub.routing.test_routing_v*.RoutingV*.test_should_accept_routing_table_without_writers_and_then_rediscover":        "Driver retries to fetch a routing table up to 100 times if it's empty",
-		"stub.routing.test_routing_v*.RoutingV*.test_should_fail_on_routing_table_with_no_reader":                            "Driver retries to fetch a routing table up to 100 times if it's empty",
-		"stub.routing.test_routing_v*.RoutingV*.test_should_fail_discovery_when_router_fails_with_unknown_code":              "Unify: other drivers have a list of fast failing errors during discover: on anything else, the driver will try the next router",
-		"stub.routing.test_routing_v*.RoutingV*.test_should_drop_connections_failing_liveness_check":                         "Liveness check error handling is not (yet) unified: https://github.com/neo-technology/drivers-adr/pull/83",
+		"stub.routing.test_routing_v*.RoutingV*.test_should_revert_to_initial_router_if_known_router_throws_protocol_errors":               "Driver always uses configured URL first and custom resolver only if that fails",
+		"stub.routing.test_routing_v*.RoutingV*.test_should_request_rt_from_all_initial_routers_until_successful_on_authorization_expired": "Driver always uses configured URL first and custom resolver only if that fails",
+		"stub.routing.test_routing_v*.RoutingV*.test_should_read_successfully_from_reachable_db_after_trying_unreachable_db":               "Driver retries to fetch a routing table up to 100 times if it's empty",
+		"stub.routing.test_routing_v*.RoutingV*.test_should_write_successfully_after_leader_switch_using_tx_run":                           "Driver retries to fetch a routing table up to 100 times if it's empty",
+		"stub.routing.test_routing_v*.RoutingV*.test_should_fail_when_writing_without_writers_using_session_run":                           "Driver retries to fetch a routing table up to 100 times if it's empty",
+		"stub.routing.test_routing_v*.RoutingV*.test_should_accept_routing_table_without_writers_and_then_rediscover":                      "Driver retries to fetch a routing table up to 100 times if it's empty",
+		"stub.routing.test_routing_v*.RoutingV*.test_should_fail_on_routing_table_with_no_reader":                                          "Driver retries to fetch a routing table up to 100 times if it's empty",
+		"stub.routing.test_routing_v*.RoutingV*.test_should_fail_discovery_when_router_fails_with_unknown_code":                            "Unify: other drivers have a list of fast failing errors during discover: on anything else, the driver will try the next router",
+		"stub.routing.test_routing_v*.RoutingV*.test_should_drop_connections_failing_liveness_check":                                       "Liveness check error handling is not (yet) unified: https://github.com/neo-technology/drivers-adr/pull/83",
 		"stub.*.test_0_timeout": "Fixme: driver omits 0 as tx timeout value",
 		"stub.summary.test_summary.TestSummaryBasicInfo.test_server_info": "pending unification: should the server address be pre or post DNS resolution?",
 	}
