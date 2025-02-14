@@ -66,6 +66,7 @@ type backend struct {
 	bookmarkManagers                map[string]neo4j.BookmarkManager
 	clientCertificateProviders      map[string]auth.ClientCertificateProvider
 	resolvedClientCertificates      map[string]auth.ClientCertificate
+	closed                          bool
 }
 
 // To implement transactional functions a bit of extra state is needed on the
@@ -162,6 +163,7 @@ func newBackend(rd *bufio.Reader, wr io.Writer) *backend {
 		consumedBookmarks:               make(map[string]struct{}),
 		clientCertificateProviders:      make(map[string]auth.ClientCertificateProvider),
 		resolvedClientCertificates:      make(map[string]auth.ClientCertificate),
+		closed:                          false,
 	}
 }
 
@@ -298,6 +300,7 @@ func (b *backend) process() bool {
 	for {
 		line, err := b.rd.ReadString('\n')
 		if err != nil {
+			b.closed = true
 			return false
 		}
 
@@ -331,6 +334,10 @@ func (b *backend) writeResponse(name string, data any) {
 	fmt.Printf("RES: %s %s\n", name, string(responseJson))
 	if err != nil {
 		panic(err.Error())
+	}
+	if b.closed {
+		fmt.Print("RES ignored because backend is closed\n")
+		return
 	}
 	// Make sure that logging framework doesn't write anything inbetween here...
 	b.wrLock.Lock()
@@ -446,8 +453,7 @@ func (b *backend) handleTransactionFunc(isRead bool, data map[string]any) {
 		b.managedTransactions[txId] = tx
 		b.writeResponse("RetryableTry", map[string]any{"id": txId})
 		// Process all things that the client might do within the transaction
-		for {
-			b.process()
+		for b.process() {
 			switch sessionState.retryableState {
 			case retryablePositive:
 				// Client succeeded and wants to commit
@@ -463,6 +469,7 @@ func (b *backend) handleTransactionFunc(isRead bool, data map[string]any) {
 				// Client did something not related to the retryable state
 			}
 		}
+		return nil, nil
 	}
 	var err error
 	if isRead {
@@ -485,8 +492,7 @@ func (b *backend) customAddressResolverFunction() config.ServerAddressResolver {
 			"id":      id,
 			"address": fmt.Sprintf("%s:%s", address.Hostname(), address.Port()),
 		})
-		for {
-			b.process()
+		for b.process() {
 			if addresses, ok := b.resolvedAddresses[id]; ok {
 				delete(b.resolvedAddresses, id)
 				result := make([]config.ServerAddress, len(addresses))
@@ -496,6 +502,7 @@ func (b *backend) customAddressResolverFunction() config.ServerAddressResolver {
 				return result
 			}
 		}
+		return nil
 	}
 }
 
@@ -513,8 +520,7 @@ func (b *backend) dnsResolverFunction() func(address string) []string {
 			"id":   id,
 			"name": host,
 		})
-		for {
-			b.process()
+		for b.process() {
 			if addresses, ok := b.dnsResolutions[id]; ok {
 				delete(b.dnsResolutions, id)
 				result := make([]string, len(addresses))
@@ -524,6 +530,7 @@ func (b *backend) dnsResolverFunction() func(address string) []string {
 				return result
 			}
 		}
+		return nil
 	}
 }
 
@@ -1188,13 +1195,13 @@ func (b *backend) handleRequest(req map[string]any) {
 						"id":                 id,
 						"authTokenManagerId": managerId,
 					})
-				for {
-					b.process()
+				for b.process() {
 					if token, ok := b.resolvedGetAuthTokens[id]; ok {
 						delete(b.resolvedGetAuthTokens, id)
 						return token
 					}
 				}
+				return neo4j.AuthToken{}
 			},
 			HandleSecurityExceptionFunc: func(token neo4j.AuthToken, error *db.Neo4jError) bool {
 				id := b.nextId()
@@ -1206,13 +1213,13 @@ func (b *backend) handleRequest(req map[string]any) {
 						"auth":               serializeAuth(token),
 						"errorCode":          error.Code,
 					})
-				for {
-					b.process()
+				for b.process() {
 					if handled, ok := b.resolvedHandleSecurityException[id]; ok {
 						delete(b.resolvedHandleSecurityException, id)
 						return handled
 					}
 				}
+				return false
 			},
 		}
 		b.authTokenManagers[managerId] = manager
@@ -1241,13 +1248,13 @@ func (b *backend) handleRequest(req map[string]any) {
 						"id":                      id,
 						"basicAuthTokenManagerId": managerId,
 					})
-				for {
-					b.process()
+				for b.process() {
 					if basicToken, ok := b.resolvedBasicTokens[id]; ok {
 						delete(b.resolvedBasicTokens, id)
 						return basicToken.token, nil
 					}
 				}
+				return neo4j.AuthToken{}, nil
 			})
 		b.authTokenManagers[managerId] = manager
 		b.writeResponse("BasicAuthTokenManager", map[string]any{"id": managerId})
@@ -1267,13 +1274,13 @@ func (b *backend) handleRequest(req map[string]any) {
 						"id":                       id,
 						"bearerAuthTokenManagerId": managerId,
 					})
-				for {
-					b.process()
+				for b.process() {
 					if bearerToken, ok := b.resolvedBearerTokens[id]; ok {
 						delete(b.resolvedBearerTokens, id)
 						return bearerToken.token, bearerToken.expiration, nil
 					}
 				}
+				return neo4j.AuthToken{}, nil, nil
 			})
 		b.authTokenManagers[managerId] = manager
 		b.writeResponse("BearerAuthTokenManager", map[string]any{"id": managerId})
@@ -1830,13 +1837,13 @@ func (b *backend) consumeBookmarks(bookmarkManagerId string) func(context.Contex
 			"bookmarkManagerId": bookmarkManagerId,
 			"bookmarks":         bookmarks,
 		})
-		for {
-			b.process()
+		for b.process() {
 			if _, found := b.consumedBookmarks[id]; found {
 				delete(b.consumedBookmarks, id)
-				return nil
+				break
 			}
 		}
+		return nil
 	}
 }
 
