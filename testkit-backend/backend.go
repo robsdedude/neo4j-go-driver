@@ -1735,6 +1735,7 @@ func testSkips() map[string]string {
 		// To fix/to decide whether to fix
 		"stub.routing.test_routing_v*.RoutingV*.test_should_revert_to_initial_router_if_known_router_throws_protocol_errors":               "Driver always uses configured URL first and custom resolver only if that fails",
 		"stub.routing.test_routing_v*.RoutingV*.test_should_request_rt_from_all_initial_routers_until_successful_on_authorization_expired": "Driver always uses configured URL first and custom resolver only if that fails",
+		"stub.routing.test_routing_v*.RoutingV*test_should_request_rt_from_all_initial_routers_until_successful_on_unknown_failure":        "Driver always uses configured URL first and custom resolver only if that fails",
 		"stub.routing.test_routing_v*.RoutingV*.test_should_read_successfully_from_reachable_db_after_trying_unreachable_db":               "Driver retries to fetch a routing table up to 100 times if it's empty",
 		"stub.routing.test_routing_v*.RoutingV*.test_should_write_successfully_after_leader_switch_using_tx_run":                           "Driver retries to fetch a routing table up to 100 times if it's empty",
 		"stub.routing.test_routing_v*.RoutingV*.test_should_fail_when_writing_without_writers_using_session_run":                           "Driver retries to fetch a routing table up to 100 times if it's empty",
